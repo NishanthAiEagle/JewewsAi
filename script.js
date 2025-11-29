@@ -1,226 +1,288 @@
-/* === CONFIG: PUT YOUR GITHUB USER + REPO === */
-const GITHUB_USER = "NishanthAiEagle";         // <-- CHANGE THIS
-const GITHUB_REPO = "JewewsAi";        // <-- CHANGE THIS
-const BRANCH = "main";                       // or master
+const videoElement = document.getElementById('webcam');
+const canvasElement = document.getElementById('overlay');
+const canvasCtx = canvasElement.getContext('2d');
 
-/* === ELEMENTS === */
-const video = document.getElementById("webcam");
-const canvas = document.getElementById("overlay");
-const ctx = canvas.getContext("2d");
+let earringImg = null;
+let necklaceImg = null;
 
-const subButtons = document.getElementById("subcategory-buttons");
-const list = document.getElementById("jewelry-options");
+let currentType = '';
+let smoothedFaceLandmarks = null;
+let camera;
+let smoothedFacePoints = {};
 
-const captureBtn = document.getElementById("capture-btn");
-const modal = document.getElementById("snapshot-modal");
-const preview = document.getElementById("snapshot-preview");
-const closeModal = document.getElementById("close-snapshot");
-const downloadBtn = document.getElementById("download-btn");
-const shareBtn = document.getElementById("share-btn");
+// ---- NEW: snapshot elements ----
+const captureBtn = document.getElementById('capture-btn');
+const snapshotModal = document.getElementById('snapshot-modal');
+const snapshotPreview = document.getElementById('snapshot-preview');
+const closeSnapshotBtn = document.getElementById('close-snapshot');
+const downloadBtn = document.getElementById('download-btn');
+const shareBtn = document.getElementById('share-btn');
+let lastSnapshotDataURL = '';
 
-let earringImg = null, necklaceImg = null;
-let smoothedLandmarks = null, smoothPts = {};
-let camera = null;
-let lastShot = "";
-
-/* ----------------------------------------------------
-   🔥 AUTO LOAD IMAGES FROM GITHUB FOLDER USING API
------------------------------------------------------- */
-
-async function fetchFolderImages(folderName) {
-  const apiURL = `https://api.github.com/repos/${GITHUB_USER}/${GITHUB_REPO}/contents/${folderName}?ref=${BRANCH}`;
-
-  try {
-    const response = await fetch(apiURL);
-    const data = await response.json();
-
-    if (!Array.isArray(data)) return [];
-
-    // Filter: only png, jpg, jpeg
-    return data
-      .filter(f =>
-        f.name.toLowerCase().endsWith(".png") ||
-        f.name.toLowerCase().endsWith(".jpg") ||
-        f.name.toLowerCase().endsWith(".jpeg")
-      )
-      .map(f => f.download_url);
-
-  } catch (err) {
-    console.error("GitHub Folder Error:", err);
-    return [];
-  }
+// ================== LOAD FROM LOCAL FOLDERS ==================
+function loadImage(src) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = src;
+  });
 }
 
-/* ========== Load Selected Category (auto image listing) ========== */
+// folder structure (inside your repo):
+// gold_earrings/gold_earrings1.png
+// diamond_necklaces/diamond_necklaces3.png
+function generateImageList(type, count = 20) {
+  const list = [];
+  for (let i = 1; i <= count; i++) {
+    list.push(`${type}/${type}${i}.png`);
+  }
+  return list;
+}
 
-async function selectJewelryType(mainType, subType) {
-  const folder = `${subType}_${mainType}`; // example: gold_earrings
+function changeJewelry(type, src) {
+  loadImage(src).then(img => {
+    if (!img) return;
+    if (type.includes("earrings")) {
+      earringImg = img;
+      necklaceImg = null;
+    } else {
+      necklaceImg = img;
+      earringImg = null;
+    }
+  });
+}
 
-  list.style.display = "flex";
-  list.innerHTML = "";
+// ================== CATEGORY SELECTION ==================
+function toggleCategory(category) {
+  document.getElementById('subcategory-buttons').style.display = "flex";
+  document.getElementById('jewelry-options').style.display = "none";
+  currentType = category;
+}
 
-  const images = await fetchFolderImages(folder);
+function selectJewelryType(mainType, subType) {
+  const type = `${subType}_${mainType}`; // e.g., gold_earrings
+  currentType = type;
 
-  images.forEach(src => {
+  document.getElementById('subcategory-buttons').style.display = "none";
+
+  const container = document.getElementById('jewelry-options');
+  container.style.display = "flex";
+  container.innerHTML = "";
+
+  const images = generateImageList(type, 20);
+
+  images.forEach((src) => {
     const btn = document.createElement("button");
     const img = document.createElement("img");
     img.src = src;
-
-    img.onload = () => {
-      btn.onclick = () => changeJewelry(mainType, subType, src);
-      btn.appendChild(img);
-      list.appendChild(btn);
-    };
-
-    img.onerror = () => console.warn("Skipping broken image:", src);
+    btn.appendChild(img);
+    btn.onclick = () => changeJewelry(type, src);
+    container.appendChild(btn);
   });
 }
 
-function changeJewelry(mainType, subType, src) {
-  const type = `${subType}_${mainType}`;
+// expose to HTML onclick
+window.toggleCategory = toggleCategory;
+window.selectJewelryType = selectJewelryType;
 
-  const image = new Image();
-  image.src = src;
-  image.onload = () => {
-    if (type.includes("earrings")) {
-      earringImg = image;
-      necklaceImg = null;
-    } else {
-      necklaceImg = image;
-      earringImg = null;
-    }
-  }
-}
-
-/* UI */
-function toggleCategory() {
-  subButtons.style.display = "flex";
-  list.style.display = "none";
-}
-
-/* ----------------------------------------------------
-   FACE MESH + CAMERA
------------------------------------------------------- */
-
-document.addEventListener("DOMContentLoaded", () => startCam());
-
-function startCam() {
-  camera = new Camera(video, {
-    onFrame: async () => await faceMesh.send({ image: video }),
-    width: 1280,
-    height: 720,
-    facingMode: "user"
-  });
-  camera.start();
-}
-
-video.addEventListener("loadedmetadata", () => {
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-});
-
+// ================== MEDIAPIPE ==================
 const faceMesh = new FaceMesh({
-  locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`
+  locateFile: (file) =>
+    `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`,
 });
 
 faceMesh.setOptions({
   maxNumFaces: 1,
   refineLandmarks: true,
   minDetectionConfidence: 0.6,
-  minTrackingConfidence: 0.6
+  minTrackingConfidence: 0.6,
 });
 
-faceMesh.onResults(res => {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+faceMesh.onResults((results) => {
+  canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
 
-  if (res.multiFaceLandmarks?.length) {
-    const raw = res.multiFaceLandmarks[0];
-    smoothedLandmarks = smoothedLandmarks
-      ? smoothedLandmarks.map((p, i) => ({
-        x: p.x * 0.8 + raw[i].x * 0.2,
-        y: p.y * 0.8 + raw[i].y * 0.2,
-        z: p.z * 0.8 + raw[i].z * 0.2
-      }))
-      : raw;
+  if (results.multiFaceLandmarks?.length) {
+    const newLandmarks = results.multiFaceLandmarks[0];
 
-    draw(smoothedLandmarks);
+    if (!smoothedFaceLandmarks) {
+      smoothedFaceLandmarks = newLandmarks;
+    } else {
+      const s = 0.2;
+      smoothedFaceLandmarks = smoothedFaceLandmarks.map((prev, i) => ({
+        x: prev.x * (1 - s) + newLandmarks[i].x * s,
+        y: prev.y * (1 - s) + newLandmarks[i].y * s,
+        z: prev.z * (1 - s) + newLandmarks[i].z * s,
+      }));
+    }
+
+    drawJewelry(smoothedFaceLandmarks, canvasCtx);
   }
 });
 
-function smooth(prev, c, f = 0.4) {
-  return !prev
-    ? c
-    : { x: prev.x * (1 - f) + c.x * f, y: prev.y * (1 - f) + c.y * f };
+// camera start
+document.addEventListener("DOMContentLoaded", () => startCamera("user"));
+
+videoElement.addEventListener("loadedmetadata", () => {
+  canvasElement.width = videoElement.videoWidth;
+  canvasElement.height = videoElement.videoHeight;
+});
+
+async function startCamera(facingMode) {
+  if (camera) camera.stop();
+
+  camera = new Camera(videoElement, {
+    onFrame: async () => {
+      await faceMesh.send({ image: videoElement });
+    },
+    width: 1280,
+    height: 720,
+    facingMode,
+  });
+
+  camera.start();
 }
 
-/* DRAWING EARRINGS + NECKLACE */
-function draw(face) {
+// smoothing helper
+function smoothPoint(prev, curr, factor = 0.4) {
+  if (!prev) return curr;
+  return {
+    x: prev.x * (1 - factor) + curr.x * factor,
+    y: prev.y * (1 - factor) + curr.y * factor,
+  };
+}
+
+// ================== DRAW JEWELRY ==================
+function drawJewelry(face, ctx) {
   if (!face) return;
 
-  const vw = canvas.width, vh = canvas.height;
-  const L = face[33], R = face[263];
-  const d = Math.hypot((R.x - L.x) * vw, (R.y - L.y) * vh);
+  const vw = canvasElement.width;
+  const vh = canvasElement.height;
 
-  /* Earrings */
-  const le = face[132], re = face[361];
-  smoothPts.left = smooth(smoothPts.left, { x: le.x * vw, y: le.y * vh });
-  smoothPts.right = smooth(smoothPts.right, { x: re.x * vw, y: re.y * vh });
+  const Leye = face[33];
+  const Reye = face[263];
+  const dx = (Reye.x - Leye.x) * vw;
+  const dy = (Reye.y - Leye.y) * vh;
+  const eyeDist = Math.hypot(dx, dy);
+
+  // ----- Earrings -----
+  const leftEar = face[132];
+  const rightEar = face[361];
+
+  const leftPos = { x: leftEar.x * vw, y: leftEar.y * vh };
+  const rightPos = { x: rightEar.x * vw, y: rightEar.y * vh };
+
+  smoothedFacePoints.leftEar = smoothPoint(smoothedFacePoints.leftEar, leftPos);
+  smoothedFacePoints.rightEar = smoothPoint(smoothedFacePoints.rightEar, rightPos);
 
   if (earringImg) {
-    const w = d * 0.42;
+    const w = eyeDist * 0.42;
     const h = w * (earringImg.height / earringImg.width);
 
-    ctx.drawImage(earringImg, smoothPts.left.x - w / 2, smoothPts.left.y - h * 0.1, w, h);
-    ctx.drawImage(earringImg, smoothPts.right.x - w / 2, smoothPts.right.y - h * 0.1, w, h);
+    ctx.drawImage(
+      earringImg,
+      smoothedFacePoints.leftEar.x - w / 2,
+      smoothedFacePoints.leftEar.y,
+      w,
+      h
+    );
+
+    ctx.drawImage(
+      earringImg,
+      smoothedFacePoints.rightEar.x - w / 2,
+      smoothedFacePoints.rightEar.y,
+      w,
+      h
+    );
   }
 
-  /* Necklace */
-  const nk = face[152];
-  smoothPts.neck = smooth(smoothPts.neck, { x: nk.x * vw, y: nk.y * vh });
+  // ----- Necklace -----
+  const neck = face[152];
+  const neckPos = { x: neck.x * vw, y: neck.y * vh };
+  smoothedFacePoints.neck = smoothPoint(smoothedFacePoints.neck, neckPos);
 
   if (necklaceImg) {
-    const w = d * 1.6;
+    const w = eyeDist * 1.4;
     const h = w * (necklaceImg.height / necklaceImg.width);
-    const offset = d * 1.0;
 
-    ctx.drawImage(necklaceImg, smoothPts.neck.x - w / 2, smoothPts.neck.y + offset, w, h);
+    const yOffset = eyeDist * 0.9;
+
+    ctx.drawImage(
+      necklaceImg,
+      smoothedFacePoints.neck.x - w / 2,
+      smoothedFacePoints.neck.y + yOffset,
+      w,
+      h
+    );
   }
 }
 
-/* SNAPSHOT */
-captureBtn.onclick = shot;
-closeModal.onclick = () => modal.style.display = "none";
+/* =====================
+   SNAPSHOT / DOWNLOAD / SHARE
+===================== */
 
-function shot() {
-  if (!smoothedLandmarks) {
-    alert("No face detected yet!");
+function takeSnapshot() {
+  if (!videoElement.videoWidth || !videoElement.videoHeight) {
+    alert("Camera not ready yet. Please try again.");
     return;
   }
 
-  const c = document.createElement("canvas");
-  c.width = video.videoWidth;
-  c.height = video.videoHeight;
-  const cx = c.getContext("2d");
+  const snapshotCanvas = document.createElement('canvas');
+  snapshotCanvas.width = canvasElement.width || videoElement.videoWidth;
+  snapshotCanvas.height = canvasElement.height || videoElement.videoHeight;
+  const ctxSnap = snapshotCanvas.getContext('2d');
 
-  cx.drawImage(video, 0, 0);
-  draw(smoothedLandmarks, cx);
+  // draw camera frame
+  ctxSnap.drawImage(videoElement, 0, 0, snapshotCanvas.width, snapshotCanvas.height);
 
-  lastShot = c.toDataURL("image/png");
-  preview.src = lastShot;
-  modal.style.display = "flex";
+  // draw jewelry overlays on snapshot
+  if (smoothedFaceLandmarks) {
+    drawJewelry(smoothedFaceLandmarks, ctxSnap);
+  }
+
+  lastSnapshotDataURL = snapshotCanvas.toDataURL('image/png');
+  snapshotPreview.src = lastSnapshotDataURL;
+  snapshotModal.style.display = 'flex';
 }
 
-downloadBtn.onclick = () => {
-  const a = document.createElement("a");
-  a.href = lastShot;
-  a.download = "jewelry-tryon.png";
-  a.click();
-};
+function saveSnapshot() {
+  if (!lastSnapshotDataURL) return;
+  const link = document.createElement('a');
+  link.href = lastSnapshotDataURL;
+  link.download = `jewelry-tryon-${Date.now()}.png`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
 
-shareBtn.onclick = async () => {
-  if (!navigator.share) return alert("Sharing not supported");
+function shareSnapshot() {
+  if (!lastSnapshotDataURL) return;
 
-  const blob = await (await fetch(lastShot)).blob();
-  const file = new File([blob], "tryon.png", { type: "image/png" });
-  await navigator.share({ files: [file], title: "My Try-On Look" });
-};
+  if (!navigator.share) {
+    alert('Sharing is not supported on this device.');
+    return;
+  }
+
+  fetch(lastSnapshotDataURL)
+    .then(res => res.blob())
+    .then(blob => {
+      const file = new File([blob], 'jewelry-tryon.png', { type: 'image/png' });
+      return navigator.share({
+        title: 'My Jewelry Try-On',
+        text: 'Check out my look!',
+        files: [file],
+      });
+    })
+    .catch(err => {
+      console.error(err);
+      alert('Unable to share image.');
+    });
+}
+
+// hook up buttons
+if (captureBtn) captureBtn.addEventListener('click', takeSnapshot);
+if (closeSnapshotBtn) closeSnapshotBtn.addEventListener('click', () => {
+  snapshotModal.style.display = 'none';
+});
+if (downloadBtn) downloadBtn.addEventListener('click', saveSnapshot);
+if (shareBtn) shareBtn.addEventListener('click', shareSnapshot);
